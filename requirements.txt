@@ -1,0 +1,2 @@
+tinytuya>=1.17.5
+paho-mqtt>=1.6.1

@@ -1,0 +1,157 @@
+"""
+mqtt_client.py — MQTT publisher with Home Assistant auto-discovery support.
+
+Discovery format:
+  homeassistant/sensor/soria2mqtt/<sensor_id>/config  →  discovery payload
+  soria2mqtt/state                                    →  JSON state payload
+  soria2mqtt/availability                             →  online / offline
+"""
+
+import json
+import logging
+import asyncio
+from typing import Any
+
+import paho.mqtt.client as mqtt
+
+from config import Config
+
+logger = logging.getLogger(__name__)
+
+AVAILABILITY_TOPIC = '{prefix}/availability'
+STATE_TOPIC        = '{prefix}/state'
+DISCOVERY_TOPIC    = '{ha_prefix}/sensor/{node_id}/{sensor_id}/config'
+
+# (sensor_id, friendly_name, unit, device_class, state_class, value_template)
+SENSORS = [
+    # Realtime (DPS 25)
+    ('w_PV',        'Solar Power',      'W',  'power',          'measurement',      '{{ value_json.w_PV }}'),
+    ('w_DC',        'DC Power',         'W',  'power',          'measurement',      '{{ value_json.w_DC }}'),
+    # Full report (DPS 21)
+    ('v1_volts',    'DC Voltage',       'V',   'voltage',       'measurement',      '{{ value_json.V1_volts }}'),
+    ('a1_amperes',  'DC Current',       'A',   'current',       'measurement',      '{{ value_json.A1_amperes }}'),
+    ('w1_watts',    'DC Power',         'W',   'power',         'measurement',      '{{ value_json.W1_watts }}'),
+    ('v2_volts',    'AC Voltage',       'V',   'voltage',       'measurement',      '{{ value_json.V2_volts }}'),
+    ('a2_amperes',  'AC Current',       'A',   'current',       'measurement',      '{{ value_json.A2_amperes }}'),
+    ('w2_watts',    'AC Power',         'W',   'power',         'measurement',      '{{ value_json.W2_watts }}'),
+    ('hz',          'Grid Frequency',   'Hz',  'frequency',     'measurement',      '{{ value_json.Hz }}'),
+    ('cos_phi',     'Power Factor',     None,  'power_factor',  'measurement',      '{{ value_json.cos_phi }}'),
+    ('temp1_c',     'Temperature 1',    '°C',  'temperature',   'measurement',      '{{ value_json.temp1_C }}'),
+    ('temp2_c',     'Temperature 2',    '°C',  'temperature',   'measurement',      '{{ value_json.temp2_C }}'),
+    ('energy_kwh',  'Energy Exported',  'kWh', 'energy',        'total_increasing', '{{ value_json.energy_kwh }}'),
+    ('wifi_signal', 'WiFi Signal',      None,  None,            'measurement',      '{{ value_json.wifi_signal }}'),
+]
+
+
+class MqttClient:
+
+    def __init__(self, config: Config):
+        self._config    = config
+        self._client    = mqtt.Client(client_id='soria2mqtt', clean_session=False)
+        self._connected = asyncio.Event()
+        self._loop      = None
+
+        if config.MQTT_USER:
+            self._client.username_pw_set(config.MQTT_USER, config.MQTT_PASSWORD)
+
+        if config.MQTT_TLS:
+            self._client.tls_set()
+
+        availability_topic = AVAILABILITY_TOPIC.format(prefix=config.MQTT_TOPIC_PREFIX)
+        self._client.will_set(availability_topic, payload='offline', retain=True)
+
+        self._client.on_connect    = self._on_connect
+        self._client.on_disconnect = self._on_disconnect
+
+    # ------------------------------------------------------------------
+    # Connection management
+    # ------------------------------------------------------------------
+
+    async def connect(self):
+        self._loop = asyncio.get_event_loop()
+        self._client.connect_async(self._config.MQTT_HOST, self._config.MQTT_PORT)
+        self._client.loop_start()
+        await self._connected.wait()
+        await self._publish_discovery()
+        await self._publish_availability('online')
+        logger.info("MQTT ready.")
+
+    async def disconnect(self):
+        await self._publish_availability('offline')
+        self._client.loop_stop()
+        self._client.disconnect()
+        logger.info("MQTT disconnected.")
+
+    def _on_connect(self, client, userdata, flags, rc):
+        if rc == 0:
+            logger.info("Connected to MQTT broker %s:%s", self._config.MQTT_HOST, self._config.MQTT_PORT)
+            self._loop.call_soon_threadsafe(self._connected.set)
+        else:
+            logger.error("MQTT connection failed (rc=%s)", rc)
+
+    def _on_disconnect(self, client, userdata, rc):
+        if rc != 0:
+            logger.warning("MQTT unexpected disconnect (rc=%s), reconnecting...", rc)
+            self._connected.clear()
+
+    # ------------------------------------------------------------------
+    # Home Assistant MQTT auto-discovery
+    # ------------------------------------------------------------------
+
+    async def _publish_discovery(self):
+        cfg      = self._config
+        node_id  = 'soria_inverter'
+        device   = {
+            'identifiers':    [cfg.DEVICE_ID],
+            'name':           'Soria Solar Inverter',
+            'manufacturer':   'Avidsen',
+            'model':          'Soria 400W',
+            'sw_version':     '1.0.0',
+        }
+        avail_topic = AVAILABILITY_TOPIC.format(prefix=cfg.MQTT_TOPIC_PREFIX)
+        state_topic = STATE_TOPIC.format(prefix=cfg.MQTT_TOPIC_PREFIX)
+
+        for (sensor_id, name, unit, device_class, state_class, value_template) in SENSORS:
+            topic   = DISCOVERY_TOPIC.format(
+                ha_prefix=cfg.HA_DISCOVERY_PREFIX,
+                node_id=node_id,
+                sensor_id=sensor_id,
+            )
+            payload = {
+                'name':                  name,
+                'unique_id':             f'soria2mqtt_{sensor_id}',
+                'state_topic':           state_topic,
+                'availability_topic':    avail_topic,
+                'value_template':        value_template,
+                'state_class':           state_class,
+                'device':                device,
+            }
+            if unit:
+                payload['unit_of_measurement'] = unit
+            if device_class:
+                payload['device_class'] = device_class
+
+            self._publish(topic, json.dumps(payload), retain=True)
+
+        logger.info("MQTT discovery published (%d sensors).", len(SENSORS))
+
+    # ------------------------------------------------------------------
+    # State publishing
+    # ------------------------------------------------------------------
+
+    async def publish_state(self, state: dict[str, Any]):
+        topic   = STATE_TOPIC.format(prefix=self._config.MQTT_TOPIC_PREFIX)
+        # Filter out None values so HA keeps the last known value
+        payload = {k: v for k, v in state.items() if v is not None}
+        self._publish(topic, json.dumps(payload))
+
+    async def _publish_availability(self, status: str):
+        topic = AVAILABILITY_TOPIC.format(prefix=self._config.MQTT_TOPIC_PREFIX)
+        self._publish(topic, status, retain=True)
+
+    def _publish(self, topic: str, payload: str, retain: bool = False):
+        result = self._client.publish(topic, payload, retain=retain, qos=1)
+        if result.rc != mqtt.MQTT_ERR_SUCCESS:
+            logger.warning("Failed to publish to %s (rc=%s)", topic, result.rc)
+        else:
+            logger.debug("→ %s : %s", topic, payload)

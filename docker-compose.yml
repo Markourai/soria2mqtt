@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  soria2mqtt:
+    build: .
+    image: soria2mqtt:latest
+    container_name: soria2mqtt
+    restart: unless-stopped
+    env_file:
+      - .env
+    network_mode: host   # required for local Tuya connection
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
