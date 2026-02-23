@@ -3,7 +3,15 @@ bridge.py — Main bridge loop.
 
 Connects to the Soria inverter via tinytuya (persistent connection),
 decodes incoming TLV frames, and publishes to MQTT.
-Handles automatic reconnection on both sides.
+
+DPS handling:
+  - DPS 25 arrives every ~2s  → updates solar_power + ac_power
+  - DPS 21 arrives every ~60s → updates all sensors including solar_power and ac_power
+  Both update the same SoriaState and trigger an MQTT publish.
+
+Note: we call device.receive() directly (not receive_and_update()) to
+intercept all DPS keys including DPS 25 which SoriaInverterDevice
+may not forward via receive_and_update().
 """
 
 import asyncio
@@ -15,25 +23,24 @@ import tinytuya
 from tinytuya.Contrib.SoriaInverterDevice import SoriaInverterDevice
 
 from config import Config
-from decoder import decode_realtime, decode_full_report
+from decoder import SoriaState, decode_realtime, decode_full_report
 from mqtt_client import MqttClient
 
 logger = logging.getLogger(__name__)
 
 DPS_REALTIME    = '25'
 DPS_FULL        = '21'
-DPS_STATUS      = '24'
-RECONNECT_DELAY = 5   # seconds before retrying after a connection error
+RECONNECT_DELAY = 5
 
 
 class SoriaBridge:
 
     def __init__(self, config: Config):
-        self._config   = config
-        self._mqtt     = MqttClient(config)
-        self._device   = None
-        self._running  = False
-        self._state    = {}  # accumulated state dict published to MQTT
+        self._config  = config
+        self._mqtt    = MqttClient(config)
+        self._device  = None
+        self._running = False
+        self._state   = SoriaState()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -81,38 +88,38 @@ class SoriaBridge:
             connection_retry_delay = 1,
         )
 
-        # Initial handshake
         loop = asyncio.get_event_loop()
+
+        # Initial handshake
         await loop.run_in_executor(None, self._device.receive)
-        logger.info("Connected to inverter. Listening for updates...")
+        logger.info("Connected. Listening for DPS updates...")
 
         last_heartbeat = time.time()
 
         while self._running:
-            # Receive one message (blocking, run in thread pool)
-            raw = await loop.run_in_executor(None, self._device.receive_and_update)
+            # Read raw message directly — catches ALL DPS keys (25 and 21)
+            raw = await loop.run_in_executor(None, self._device.receive)
 
             if raw and 'dps' in raw:
-                dps_keys = raw['dps'].keys()
+                dps = raw['dps']
+                changed = False
 
-                if DPS_REALTIME in dps_keys:
-                    b64 = raw['dps'][DPS_REALTIME]
-                    data = decode_realtime(b64)
-                    if data:
-                        logger.debug("Realtime: %s", data)
-                        self._state.update(dataclasses.asdict(data))
-                        await self._mqtt.publish_state(self._state)
+                if DPS_REALTIME in dps:
+                    changed = decode_realtime(dps[DPS_REALTIME], self._state)
+                    if changed:
+                        logger.debug("Realtime → solar_power=%sW ac_power=%sW",
+                                     self._state.solar_power, self._state.ac_power)
 
-                if DPS_FULL in dps_keys:
-                    b64 = raw['dps'][DPS_FULL]
-                    data = decode_full_report(b64)
-                    if data:
-                        logger.info("Full report: %s", data)
-                        self._state.update(dataclasses.asdict(data))
-                        await self._mqtt.publish_state(self._state)
+                if DPS_FULL in dps:
+                    changed = decode_full_report(dps[DPS_FULL], self._state)
+                    if changed:
+                        logger.info("Full report → %s", self._state)
 
-            # Heartbeat to keep connection alive
-            if time.time() - last_heartbeat > self._config.HEARTBEAT_DELAY:
+                if changed:
+                    await self._mqtt.publish_state(dataclasses.asdict(self._state))
+
+            # Heartbeat
+            if time.time() - last_heartbeat > cfg.HEARTBEAT_DELAY:
                 await loop.run_in_executor(None, self._send_heartbeat)
                 last_heartbeat = time.time()
 

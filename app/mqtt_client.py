@@ -24,22 +24,24 @@ DISCOVERY_TOPIC    = '{ha_prefix}/sensor/{node_id}/{sensor_id}/config'
 
 # (sensor_id, friendly_name, unit, device_class, state_class, value_template)
 SENSORS = [
-    # Realtime (DPS 25)
-    ('w_PV',        'Solar Power',      'W',  'power',          'measurement',      '{{ value_json.w_PV }}'),
-    ('w_DC',        'DC Power',         'W',  'power',          'measurement',      '{{ value_json.w_DC }}'),
-    # Full report (DPS 21)
-    ('v1_volts',    'DC Voltage',       'V',   'voltage',       'measurement',      '{{ value_json.V1_volts }}'),
-    ('a1_amperes',  'DC Current',       'A',   'current',       'measurement',      '{{ value_json.A1_amperes }}'),
-    ('w1_watts',    'DC Power',         'W',   'power',         'measurement',      '{{ value_json.W1_watts }}'),
-    ('v2_volts',    'AC Voltage',       'V',   'voltage',       'measurement',      '{{ value_json.V2_volts }}'),
-    ('a2_amperes',  'AC Current',       'A',   'current',       'measurement',      '{{ value_json.A2_amperes }}'),
-    ('w2_watts',    'AC Power',         'W',   'power',         'measurement',      '{{ value_json.W2_watts }}'),
-    ('hz',          'Grid Frequency',   'Hz',  'frequency',     'measurement',      '{{ value_json.Hz }}'),
-    ('cos_phi',     'Power Factor',     None,  'power_factor',  'measurement',      '{{ value_json.cos_phi }}'),
-    ('temp1_c',     'Temperature 1',    '°C',  'temperature',   'measurement',      '{{ value_json.temp1_C }}'),
-    ('temp2_c',     'Temperature 2',    '°C',  'temperature',   'measurement',      '{{ value_json.temp2_C }}'),
-    ('energy_kwh',  'Energy Exported',  'kWh', 'energy',        'total_increasing', '{{ value_json.energy_kwh }}'),
-    ('wifi_signal', 'WiFi Signal',      None,  None,            'measurement',      '{{ value_json.wifi_signal }}'),
+    # --- Puissance solaire — unique sensor mis a jour par DPS 25 (~2s) ET DPS 21 (~60s)
+    ('solar_power',  'Solar Power',      'W',   'power',         'measurement',      '{{ value_json.solar_power }}'),
+    ('ac_power',     'AC Power',         'W',   'power',         'measurement',      '{{ value_json.ac_power }}'),
+    # --- Circuit DC (panneau)
+    ('v1_volts',     'DC Voltage',       'V',   'voltage',       'measurement',      '{{ value_json.V1_volts }}'),
+    ('a1_amperes',   'DC Current',       'A',   'current',       'measurement',      '{{ value_json.A1_amperes }}'),
+    # --- Circuit AC (reseau)
+    ('v2_volts',     'AC Voltage',       'V',   'voltage',       'measurement',      '{{ value_json.V2_volts }}'),
+    ('a2_amperes',   'AC Current',       'A',   'current',       'measurement',      '{{ value_json.A2_amperes }}'),
+    # --- Qualite reseau
+    ('hz',           'Grid Frequency',   'Hz',  'frequency',     'measurement',      '{{ value_json.Hz }}'),
+    # --- Temperatures
+    ('temp1_c',      'Temperature 1',    '°C',  'temperature',   'measurement',      '{{ value_json.temp1_C }}'),
+    ('temp2_c',      'Temperature 2',    '°C',  'temperature',   'measurement',      '{{ value_json.temp2_C }}'),
+    # --- Energie cumulee
+    ('energy_kwh',   'Energy Exported',  'kWh', 'energy',        'total_increasing', '{{ value_json.energy_kwh }}'),
+    # --- Connectivite
+    ('wifi_signal',  'WiFi Signal',      None,  None,            'measurement',      '{{ value_json.wifi_signal }}'),
 ]
 
 
@@ -106,7 +108,7 @@ class MqttClient:
             'name':           'Soria Solar Inverter',
             'manufacturer':   'Avidsen',
             'model':          'Soria 400W',
-            'sw_version':     '1.0.0',
+            'sw_version':     '1.0.1',
         }
         avail_topic = AVAILABILITY_TOPIC.format(prefix=cfg.MQTT_TOPIC_PREFIX)
         state_topic = STATE_TOPIC.format(prefix=cfg.MQTT_TOPIC_PREFIX)

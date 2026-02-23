@@ -4,12 +4,20 @@ decoder.py — TLV protocol decoder for the Avidsen Soria solar inverter.
 Ported from tinytuya/Contrib/SoriaInverterDevice.py.
 Decodes Base64-encoded binary frames using the repeating TLV structure:
     [PREFIX: 3 bytes] [TAG: 1 byte] [VALUE: 2 bytes big-endian]
+
+Notes:
+  - solar_power (W) is the single authoritative power sensor, sourced from:
+      DPS 25 (TAG 0x49, realtime ~2s)  or  DPS 21 (TAG 0x31, full report ~60s)
+  - A1_amperes uses a 16-bit unsigned tag: 0xFFFF (65535 raw) means the DC
+    current sensor is saturated / in error — these values are filtered out.
+  - cos_phi is always 1.0 on this device (micro-inverter injects in-phase),
+    so it is not published.
 """
 
 import base64
 import logging
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -21,50 +29,59 @@ TAG_WIFI_SIGNAL  = 0x00
 TAG_ENERGY_KWH   = 0x02  # duplicated in 0x06 and 0x4c
 TAG_V2_VOLTS     = 0x07
 TAG_A2_AMPERES   = 0x1a
-TAG_W2_WATTS     = 0x1e
+TAG_GRID         = 0x1e  # AC power (W) - realtime (same value as 0x27)
 TAG_HZ           = 0x23
-TAG_W_APPARENT   = 0x27  # duplicated in 0x2a
-TAG_W1_WATTS     = 0x31
+TAG_W_APPARENT   = 0x27  # AC power (W) - full report
+TAG_W_SOLAR      = 0x31  # DC solar power (W) — full report
 TAG_V1_VOLTS     = 0x32
 TAG_A1_AMPERES   = 0x33
-TAG_W_ACTIVE     = 0x49  # same as 0x31 in realtime frame
-TAG_COS_PHI      = 0x4a
+TAG_W_ACTIVE     = 0x49  # DC solar power (W) — realtime (same value as 0x31)
 TAG_TEMP1        = 0x57
 TAG_TEMP2        = 0x58
 
+# Sentinel values emitted by the device when DC current is unmeasurable
+# (panel in shadow, end of day). Raw 16-bit value = 0xFFFF = 65535.
+_A1_INVALID_RAW = 0xFFFF
+
+# Sanity ceiling for DC current: above this the value is certainly garbage.
+# The Soria 400W has a rated max DC current of ~10A.
+_A1_MAX_AMPS = 20.0
+
 
 # ---------------------------------------------------------------------------
-# Decoded data structures
+# Unified state (merged from both DPS 25 and DPS 21)
 # ---------------------------------------------------------------------------
 
 @dataclass
-class RealtimeData:
-    """Decoded from DPS '25' — published every ~2 seconds."""
-    W_active:   Optional[int] = None   # active power (W)
-    W_apparent: Optional[int] = None   # apparent power (VA)
+class SoriaState:
+    """
+    Single state object updated by both realtime (DPS 25) and full report
+    (DPS 21) frames. solar_power is the canonical power sensor shared by both.
+    """
+    # Power — updated by DPS 25 every ~2s AND by DPS 21 every ~60s
+    solar_power:  Optional[int]   = None  # DC power (W)
+    ac_power:     Optional[int]   = None  # AC power injected (W)
 
+    # DC circuit — updated by DPS 21 only
+    V1_volts:     Optional[float] = None  # DC voltage (V)
+    A1_amperes:   Optional[float] = None  # DC current (A) — None if invalid
 
-@dataclass
-class FullReportData:
-    """Decoded from DPS '21' — published every ~60 seconds."""
-    # DC circuit (panel / battery)
-    V1_volts:    Optional[float] = None
-    A1_amperes:  Optional[float] = None
-    W1_watts:    Optional[int]   = None
-    # AC grid
-    V2_volts:    Optional[float] = None
-    A2_amperes:  Optional[float] = None
-    W2_watts:    Optional[int]   = None
-    # Grid quality
-    Hz:          Optional[float] = None
-    cos_phi:     Optional[float] = None
-    # Thermal
-    temp1_C:     Optional[float] = None
-    temp2_C:     Optional[float] = None
-    # Energy
-    energy_kwh:  Optional[float] = None
-    # Connectivity
-    wifi_signal: Optional[int]   = None
+    # AC grid — updated by DPS 21 only
+    V2_volts:     Optional[float] = None  # grid voltage (V)
+    A2_amperes:   Optional[float] = None  # grid current (A)
+
+    # Grid quality — updated by DPS 21 only
+    Hz:           Optional[float] = None
+
+    # Thermal — updated by DPS 21 only
+    temp1_C:      Optional[float] = None
+    temp2_C:      Optional[float] = None
+
+    # Energy — updated by DPS 21 only
+    energy_kwh:   Optional[float] = None
+
+    # Connectivity — updated by DPS 21 only
+    wifi_signal:  Optional[int]   = None
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +89,6 @@ class FullReportData:
 # ---------------------------------------------------------------------------
 
 def _detect_prefix(data: bytes) -> bytes:
-    """Return the most frequent 3-byte sequence — that is the TLV prefix."""
     counts: Counter = Counter()
     for i in range(len(data) - 5):
         candidate = data[i:i+3]
@@ -84,7 +100,6 @@ def _detect_prefix(data: bytes) -> bytes:
 
 
 def _parse_tlv(data: bytes) -> dict:
-    """Extract all {tag: value} pairs from a binary TLV frame."""
     prefix = _detect_prefix(data)
     tags = {}
     i = 0
@@ -100,7 +115,6 @@ def _parse_tlv(data: bytes) -> dict:
 
 
 def _decode_b64(b64_value: str) -> dict:
-    """Decode a Base64 DPS string into a tag dict. Returns {} on error."""
     try:
         return _parse_tlv(base64.b64decode(b64_value))
     except Exception as e:
@@ -112,49 +126,74 @@ def _get(tags: dict, tag_id: int) -> Optional[int]:
     return tags.get(tag_id)
 
 
+def _valid_a1(raw: Optional[int]) -> Optional[float]:
+    """Return DC current in A, or None if the raw value is a sentinel/garbage."""
+    if raw is None:
+        return None
+    if raw == _A1_INVALID_RAW:
+        return None
+    value = round(raw / 100, 2)
+    if value > _A1_MAX_AMPS:
+        logger.debug("A1 filtered out (raw=%d, computed=%.2f A > max %.1f A)", raw, value, _A1_MAX_AMPS)
+        return None
+    return value
+
+
 # ---------------------------------------------------------------------------
-# Public decoders
+# Public decoders — both return partial updates to be merged into SoriaState
 # ---------------------------------------------------------------------------
 
-def decode_realtime(b64_value: str) -> Optional[RealtimeData]:
-    """Decode DPS '25' — real-time power frame."""
+def decode_realtime(b64_value: str, state: SoriaState) -> bool:
+    """
+    Decode DPS '25' and update state in-place.
+    Returns True if anything changed.
+    """
     tags = _decode_b64(b64_value)
     if not tags:
-        return None
+        return False
 
     w_active = _get(tags, TAG_W_ACTIVE)
     if w_active is None:
-        return None
+        return False
 
-    return RealtimeData(
-        W_active   = w_active,
-        W_apparent = _get(tags, TAG_W_APPARENT),
-    )
+    state.solar_power = w_active
 
+    w_apparent = _get(tags, TAG_W_APPARENT)
+    if w_apparent is None:
+        return False
+    
+    state.ac_power  = w_apparent
 
-def decode_full_report(b64_value: str) -> Optional[FullReportData]:
-    """Decode DPS '21' — full electrical report frame."""
+def decode_full_report(b64_value: str, state: SoriaState) -> bool:
+    """
+    Decode DPS '21' and update state in-place.
+    Returns True if anything changed.
+    """
     tags = _decode_b64(b64_value)
     if not tags:
-        return None
+        return False
 
     def t(tag_id):
         return _get(tags, tag_id)
 
-    if t(TAG_W1_WATTS) is None:
-        return None
+    w_solar = t(TAG_W_SOLAR)
+    if w_solar is None:
+        return False
+    
+    ac_power = t(TAG_GRID)
+    if ac_power is None:
+        return False
 
-    return FullReportData(
-        V1_volts    = round(t(TAG_V1_VOLTS)   / 10,  1) if t(TAG_V1_VOLTS)   is not None else None,
-        A1_amperes  = round(t(TAG_A1_AMPERES)  / 100, 2) if t(TAG_A1_AMPERES) is not None else None,
-        W1_watts    = t(TAG_W1_WATTS),
-        V2_volts    = round(t(TAG_V2_VOLTS)   / 10,  1) if t(TAG_V2_VOLTS)   is not None else None,
-        A2_amperes  = round(t(TAG_A2_AMPERES)  / 100, 2) if t(TAG_A2_AMPERES) is not None else None,
-        W2_watts    = t(TAG_W2_WATTS),
-        Hz          = round(t(TAG_HZ)          / 100, 2) if t(TAG_HZ)         is not None else None,
-        cos_phi     = round(t(TAG_COS_PHI)     / 100, 2) if t(TAG_COS_PHI)    is not None else None,
-        temp1_C     = round(t(TAG_TEMP1)       / 10,  1) if t(TAG_TEMP1)      is not None else None,
-        temp2_C     = round(t(TAG_TEMP2)       / 10,  1) if t(TAG_TEMP2)      is not None else None,
-        energy_kwh  = round(t(TAG_ENERGY_KWH)  / 100, 2) if t(TAG_ENERGY_KWH) is not None else None,
-        wifi_signal = t(TAG_WIFI_SIGNAL),
-    )
+    # solar_power: take the full-report value (same measurement as DPS 25)
+    state.solar_power = w_solar
+    state.V1_volts    = round(t(TAG_V1_VOLTS)  / 10,  1) if t(TAG_V1_VOLTS)  is not None else None
+    state.A1_amperes  = _valid_a1(t(TAG_A1_AMPERES))
+    state.V2_volts    = round(t(TAG_V2_VOLTS)  / 10,  1) if t(TAG_V2_VOLTS)  is not None else None
+    state.A2_amperes  = round(t(TAG_A2_AMPERES) / 100, 2) if t(TAG_A2_AMPERES) is not None else None
+    state.ac_power    = ac_power
+    state.Hz          = round(t(TAG_HZ)         / 100, 2) if t(TAG_HZ)         is not None else None
+    state.temp1_C     = round(t(TAG_TEMP1)      / 10,  1) if t(TAG_TEMP1)      is not None else None
+    state.temp2_C     = round(t(TAG_TEMP2)      / 10,  1) if t(TAG_TEMP2)      is not None else None
+    state.energy_kwh  = round(t(TAG_ENERGY_KWH) / 100, 2) if t(TAG_ENERGY_KWH) is not None else None
+    state.wifi_signal = t(TAG_WIFI_SIGNAL)
+    return True
