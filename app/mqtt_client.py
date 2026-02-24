@@ -2,9 +2,9 @@
 mqtt_client.py — MQTT publisher with Home Assistant auto-discovery support.
 
 Discovery format:
-  homeassistant/sensor/soria2mqtt/<sensor_id>/config  →  discovery payload
-  soria2mqtt/state                                    →  JSON state payload
-  soria2mqtt/availability                             →  online / offline
+  homeassistant/sensor/<node_id>/<sensor_id>/config       →  discovery payload
+  soria2mqtt/state                                        →  JSON state payload
+  soria2mqtt/availability                                 →  online / offline
 """
 
 import json
@@ -24,23 +24,23 @@ DISCOVERY_TOPIC    = '{ha_prefix}/sensor/{node_id}/{sensor_id}/config'
 
 # (sensor_id, friendly_name, unit, device_class, state_class, value_template)
 SENSORS = [
-    # --- Puissance solaire — unique sensor mis a jour par DPS 25 (~2s) ET DPS 21 (~60s)
+    # --- Power — update by DPS 25 (~2s) and DPS 21 (~60s)
     ('solar_power',  'Solar Power',      'W',   'power',         'measurement',      '{{ value_json.solar_power }}'),
     ('ac_power',     'AC Power',         'W',   'power',         'measurement',      '{{ value_json.ac_power }}'),
-    # --- Circuit DC (panneau)
-    ('v1_volts',     'DC Voltage',       'V',   'voltage',       'measurement',      '{{ value_json.V1_volts }}'),
-    ('a1_amperes',   'DC Current',       'A',   'current',       'measurement',      '{{ value_json.A1_amperes }}'),
-    # --- Circuit AC (reseau)
-    ('v2_volts',     'AC Voltage',       'V',   'voltage',       'measurement',      '{{ value_json.V2_volts }}'),
-    ('a2_amperes',   'AC Current',       'A',   'current',       'measurement',      '{{ value_json.A2_amperes }}'),
-    # --- Qualite reseau
-    ('hz',           'Grid Frequency',   'Hz',  'frequency',     'measurement',      '{{ value_json.Hz }}'),
+    # --- DC solar panel
+    ('dc_voltage',   'DC Voltage',       'V',   'voltage',       'measurement',      '{{ value_json.dc_voltage }}'),
+    ('dc_current',   'DC Current',       'A',   'current',       'measurement',      '{{ value_json.dc_current }}'),
+    # --- AC grid
+    ('ac_voltage',   'AC Voltage',       'V',   'voltage',       'measurement',      '{{ value_json.ac_voltage }}'),
+    ('ac_current',   'AC Current',       'A',   'current',       'measurement',      '{{ value_json.ac_current }}'),
+    # --- Grid quality
+    ('frequency',    'Grid Frequency',   'Hz',  'frequency',     'measurement',      '{{ value_json.frequency }}'),
     # --- Temperatures
-    ('temp1_c',      'Temperature 1',    '°C',  'temperature',   'measurement',      '{{ value_json.temp1_C }}'),
-    ('temp2_c',      'Temperature 2',    '°C',  'temperature',   'measurement',      '{{ value_json.temp2_C }}'),
-    # --- Energie cumulee
+    ('temp1',        'Temperature 1',    '°C',  'temperature',   'measurement',      '{{ value_json.temp1 }}'),
+    ('temp2',        'Temperature 2',    '°C',  'temperature',   'measurement',      '{{ value_json.temp2 }}'),
+    # --- Cumulative Energy
     ('energy_kwh',   'Energy Exported',  'kWh', 'energy',        'total_increasing', '{{ value_json.energy_kwh }}'),
-    # --- Connectivite
+    # --- Connectivity
     ('wifi_signal',  'WiFi Signal',      None,  None,            'measurement',      '{{ value_json.wifi_signal }}'),
 ]
 
@@ -102,7 +102,7 @@ class MqttClient:
 
     async def _publish_discovery(self):
         cfg      = self._config
-        node_id  = 'soria_inverter'
+        node_id  = f'soria_{cfg.DEVICE_ID[-8:]}'
         device   = {
             'identifiers':    [cfg.DEVICE_ID],
             'name':           'Soria Solar Inverter',
@@ -114,19 +114,19 @@ class MqttClient:
         state_topic = STATE_TOPIC.format(prefix=cfg.MQTT_TOPIC_PREFIX)
 
         for (sensor_id, name, unit, device_class, state_class, value_template) in SENSORS:
-            topic   = DISCOVERY_TOPIC.format(
+            topic = DISCOVERY_TOPIC.format(
                 ha_prefix=cfg.HA_DISCOVERY_PREFIX,
                 node_id=node_id,
                 sensor_id=sensor_id,
             )
             payload = {
-                'name':                  name,
-                'unique_id':             f'soria2mqtt_{sensor_id}',
-                'state_topic':           state_topic,
-                'availability_topic':    avail_topic,
-                'value_template':        value_template,
-                'state_class':           state_class,
-                'device':                device,
+                'name':               name,
+                'unique_id':          f'soria2mqtt_{cfg.DEVICE_ID[-8:]}_{sensor_id}',
+                'state_topic':        state_topic,
+                'availability_topic': avail_topic,
+                'value_template':     value_template,
+                'state_class':        state_class,
+                'device':             device,
             }
             if unit:
                 payload['unit_of_measurement'] = unit
@@ -134,6 +134,7 @@ class MqttClient:
                 payload['device_class'] = device_class
 
             self._publish(topic, json.dumps(payload), retain=True)
+            logger.debug("Discovery: %s", topic)
 
         logger.info("MQTT discovery published (%d sensors).", len(SENSORS))
 
@@ -146,6 +147,7 @@ class MqttClient:
         # Filter out None values so HA keeps the last known value
         payload = {k: v for k, v in state.items() if v is not None}
         self._publish(topic, json.dumps(payload))
+        logger.debug("State: %s", payload)
 
     async def _publish_availability(self, status: str):
         topic = AVAILABILITY_TOPIC.format(prefix=self._config.MQTT_TOPIC_PREFIX)
@@ -156,4 +158,4 @@ class MqttClient:
         if result.rc != mqtt.MQTT_ERR_SUCCESS:
             logger.warning("Failed to publish to %s (rc=%s)", topic, result.rc)
         else:
-            logger.debug("→ %s : %s", topic, payload)
+            logger.debug("-> %s : %s", topic, payload)
