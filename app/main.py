@@ -16,6 +16,8 @@ import sys
 from config import Config
 from bridge import SoriaBridge
 
+VERSION = "1.0.2"
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
@@ -27,6 +29,7 @@ logger = logging.getLogger('soria2mqtt')
 async def main():
     logger.info("=" * 50)
     logger.info("  soria2mqtt — Soria Solar Inverter to MQTT")
+    logger.info("  version: %s  ", VERSION)
     logger.info("=" * 50)
 
     config = Config.from_env()

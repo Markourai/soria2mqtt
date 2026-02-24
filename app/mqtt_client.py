@@ -108,7 +108,7 @@ class MqttClient:
             'name':           'Soria Solar Inverter',
             'manufacturer':   'Avidsen',
             'model':          'Soria 400W',
-            'sw_version':     '1.0.1',
+            'sw_version':     '1.0.0',
         }
         avail_topic = AVAILABILITY_TOPIC.format(prefix=cfg.MQTT_TOPIC_PREFIX)
         state_topic = STATE_TOPIC.format(prefix=cfg.MQTT_TOPIC_PREFIX)
