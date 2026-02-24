@@ -6,8 +6,16 @@ services:
     image: soria2mqtt:latest
     container_name: soria2mqtt
     restart: unless-stopped
-    env_file:
-      - .env
+    environment:
+      SORIA_DEVICE_ID: xxxxxxx # change it with your device_id
+      SORIA_DEVICE_IP: yyyyyyy # change it with the device IP
+      SORIA_LOCAL_KEY: zzzzzzz # change it with the device local key
+      SORIA_TUYA_VERSION: 3.5
+      MQTT_HOST: mymqtt # Put your MQTT DNS or IP
+      MQTT_USER: myuser
+      MQTT_PASSWORD: mypassword
+      MQTT_PORT: 1883
+      LOG_LEVEL: INFO
     network_mode: host   # required for local Tuya connection
     logging:
       driver: json-file
