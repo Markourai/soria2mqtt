@@ -103,12 +103,13 @@ class SoriaBridge:
             if raw and 'dps' in raw:
                 dps = raw['dps']
                 changed = False
+                logger.debug("DPS received — keys: %s", list(dps.keys()))
 
                 if DPS_REALTIME in dps:
                     changed = decode_realtime(dps[DPS_REALTIME], self._state)
                     if changed:
-                        logger.debug("Realtime → solar_power=%sW ac_power=%sW",
-                                     self._state.solar_power, self._state.ac_power)
+                        logger.info("Realtime → solar_power=%sW ac_power=%sW",
+                                    self._state.solar_power, self._state.ac_power)
 
                 if DPS_FULL in dps:
                     changed = decode_full_report(dps[DPS_FULL], self._state)
@@ -117,6 +118,9 @@ class SoriaBridge:
 
                 if changed:
                     await self._mqtt.publish_state(dataclasses.asdict(self._state))
+
+            elif raw:
+                logger.debug("Non-DPS message: %s", raw)
 
             # Heartbeat
             if time.time() - last_heartbeat > cfg.HEARTBEAT_DELAY:
