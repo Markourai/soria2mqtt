@@ -33,7 +33,10 @@ logger = logging.getLogger(__name__)
 DPS_REALTIME    = '25'
 DPS_FULL        = '21'
 
-# Reconnection backoff : start with 5s, double each time it fails, max 5min
+# If no message receive during this timeframe, then device is consedred offline
+RECEIVE_TIMEOUT = 180  # seconds (full report are every ~60s)
+
+# Reconnection backoff
 RECONNECT_DELAY_MIN = 5
 RECONNECT_DELAY_MAX = 300
 
@@ -85,31 +88,42 @@ class SoriaBridge:
     # ------------------------------------------------------------------
 
     async def _run_device_loop(self):
-        cfg = self._config
+        cfg  = self._config
+        loop = asyncio.get_event_loop()
         logger.info("Connecting to Soria inverter %s @ %s...", cfg.DEVICE_ID, cfg.DEVICE_IP)
 
         self._device = SoriaInverterDevice(
-            dev_id                 = cfg.DEVICE_ID,
-            address                = cfg.DEVICE_IP,
-            local_key              = cfg.LOCAL_KEY,
-            version                = cfg.TUYA_VERSION,
-            persist                = True,
-            connection_timeout     = 5,
-            connection_retry_limit = 0, 
-            connection_retry_delay = 0,
+            dev_id             = cfg.DEVICE_ID,
+            address            = cfg.DEVICE_IP,
+            local_key          = cfg.LOCAL_KEY,
+            version            = cfg.TUYA_VERSION,
+            persist            = True,
+            connection_timeout = 5,
         )
 
-        loop = asyncio.get_event_loop()
+        try:
+            await asyncio.wait_for(
+                loop.run_in_executor(None, self._device.receive),
+                timeout=10,
+            )
+        except asyncio.TimeoutError:
+            raise ConnectionError("Inverter did not respond within 10s")
 
-        # Initial handshake
-        await loop.run_in_executor(None, self._device.receive)
         logger.info("Connected. Listening for DPS updates...")
         await self._mqtt.publish_availability('online')
 
         last_heartbeat = time.time()
 
         while self._running:
-            raw = await loop.run_in_executor(None, self._device.receive)
+            try:
+                raw = await asyncio.wait_for(
+                    loop.run_in_executor(None, self._device.receive),
+                    timeout=RECEIVE_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                raise ConnectionError(
+                    f"No message received for {RECEIVE_TIMEOUT}s — inverter offline?"
+                )
 
             if raw and 'dps' in raw:
                 dps = raw['dps']
@@ -130,12 +144,11 @@ class SoriaBridge:
                 if changed:
                     await self._mqtt.publish_state(dataclasses.asdict(self._state))
 
-            elif raw:
-                logger.debug("Non-DPS message: %s", raw)
-
             elif raw is None:
-                # receive() retourne None = lost connection
                 raise ConnectionError("Lost connection to inverter (receive returned None)")
+
+            else:
+                logger.debug("Non-DPS message: %s", raw)
 
             # Heartbeat
             if time.time() - last_heartbeat > cfg.HEARTBEAT_DELAY:
