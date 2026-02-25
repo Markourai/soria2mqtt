@@ -23,6 +23,7 @@ logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
 )
+logging.getLogger('tinytuya').setLevel(logging.WARNING)
 logger = logging.getLogger('soria2mqtt')
 
 

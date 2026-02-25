@@ -8,10 +8,12 @@ DPS handling:
   - DPS 25 arrives every ~2s  → updates solar_power + ac_power
   - DPS 21 arrives every ~60s → updates all sensors including solar_power and ac_power
   Both update the same SoriaState and trigger an MQTT publish.
-
-Note: we call device.receive() directly (not receive_and_update()) to
-intercept all DPS keys including DPS 25 which SoriaInverterDevice
-may not forward via receive_and_update().
+Device availability:
+  - The inverter is only reachable when producing solar energy (daytime).
+  - At night it shuts down completely (no DC power = no WiFi).
+  - On connection loss, availability is set to offline and reconnection
+    is retried with exponential backoff (5s → 10s → 20s → ... → 5min max).
+  - On reconnection, availability is restored to online automatically.
 """
 
 import asyncio
@@ -30,7 +32,10 @@ logger = logging.getLogger(__name__)
 
 DPS_REALTIME    = '25'
 DPS_FULL        = '21'
-RECONNECT_DELAY = 5
+
+# Reconnection backoff : start with 5s, double each time it fails, max 5min
+RECONNECT_DELAY_MIN = 5
+RECONNECT_DELAY_MAX = 300
 
 
 class SoriaBridge:
@@ -50,13 +55,19 @@ class SoriaBridge:
         self._running = True
         await self._mqtt.connect()
 
+        delay = RECONNECT_DELAY_MIN
         while self._running:
             try:
                 await self._run_device_loop()
+                delay = RECONNECT_DELAY_MIN  # reset backoff on clean exit
             except Exception as e:
-                if self._running:
-                    logger.error("Device loop error: %s — retrying in %ds", e, RECONNECT_DELAY)
-                    await asyncio.sleep(RECONNECT_DELAY)
+                if not self._running:
+                    break
+                logger.warning("Inverter unreachable: %s", e)
+                await self._mqtt.publish_availability('offline')
+                logger.info("Retrying in %ds...", delay)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, RECONNECT_DELAY_MAX)
 
         await self._mqtt.disconnect()
 
@@ -84,8 +95,8 @@ class SoriaBridge:
             version                = cfg.TUYA_VERSION,
             persist                = True,
             connection_timeout     = 5,
-            connection_retry_limit = 999,
-            connection_retry_delay = 1,
+            connection_retry_limit = 0, 
+            connection_retry_delay = 0,
         )
 
         loop = asyncio.get_event_loop()
@@ -93,11 +104,11 @@ class SoriaBridge:
         # Initial handshake
         await loop.run_in_executor(None, self._device.receive)
         logger.info("Connected. Listening for DPS updates...")
+        await self._mqtt.publish_availability('online')
 
         last_heartbeat = time.time()
 
         while self._running:
-            # Read raw message directly — catches ALL DPS keys (25 and 21)
             raw = await loop.run_in_executor(None, self._device.receive)
 
             if raw and 'dps' in raw:
@@ -122,6 +133,10 @@ class SoriaBridge:
             elif raw:
                 logger.debug("Non-DPS message: %s", raw)
 
+            elif raw is None:
+                # receive() retourne None = lost connection
+                raise ConnectionError("Lost connection to inverter (receive returned None)")
+
             # Heartbeat
             if time.time() - last_heartbeat > cfg.HEARTBEAT_DELAY:
                 await loop.run_in_executor(None, self._send_heartbeat)
@@ -136,3 +151,4 @@ class SoriaBridge:
             logger.debug("Heartbeat sent.")
         except Exception as e:
             logger.warning("Heartbeat failed: %s", e)
+            raise
