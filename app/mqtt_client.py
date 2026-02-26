@@ -49,6 +49,7 @@ class MqttClient:
 
     def __init__(self, config: Config):
         self._config    = config
+        # clean_session=True : no persistent session that would replay the will
         self._client    = mqtt.Client(client_id='soria2mqtt', clean_session=True)
         self._connected = asyncio.Event()
         self._loop      = None
@@ -59,6 +60,7 @@ class MqttClient:
         if config.MQTT_TLS:
             self._client.tls_set()
 
+        # Last Will: published by the broker if the connection is suddenly lost
         availability_topic = AVAILABILITY_TOPIC.format(prefix=config.MQTT_TOPIC_PREFIX)
         self._client.will_set(availability_topic, payload='offline', retain=True, qos=1)
 
@@ -75,7 +77,7 @@ class MqttClient:
         self._client.loop_start()
         await self._connected.wait()
         await self._publish_discovery()
-        await self.publish_availability('online')
+        # Do not publish online here — bridge.py does that after successful connection to the inverter
         logger.info("MQTT ready.")
 
     async def disconnect(self):
@@ -186,5 +188,3 @@ class MqttClient:
         result = self._client.publish(topic, payload, retain=retain, qos=1)
         if result.rc != mqtt.MQTT_ERR_SUCCESS:
             logger.warning("Failed to publish to %s (rc=%s)", topic, result.rc)
-        else:
-            logger.debug("-> %s : %s", topic, payload)
