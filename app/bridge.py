@@ -11,8 +11,9 @@ DPS handling:
 Device availability:
   - The inverter is only reachable when producing solar energy (daytime).
   - At night it shuts down completely (no DC power = no WiFi).
-  - On connection loss, the heartbeat fails and triggers offline + backoff.
-  - Reconnection is retried with exponential backoff (5s -> 10s -> ... -> 5min).
+  - On connection loss, availability is set to offline and reconnection
+    is retried with exponential backoff (5s -> 10s -> 20s -> ... -> 5min max).
+  - On reconnection, availability is restored to online automatically.
 """
 
 import asyncio
@@ -29,8 +30,12 @@ from mqtt_client import MqttClient
 
 logger = logging.getLogger(__name__)
 
-DPS_REALTIME    = '25'
-DPS_FULL        = '21'
+DPS_REALTIME = '25'
+DPS_FULL     = '21'
+
+# If no DPS message is received within this timeframe → device considered offline.
+# The full report arrives approximately every 60 seconds; 3 missed cycles are tolerated.
+RECEIVE_TIMEOUT = 180  # secondes
 
 # Reconnection backoff
 RECONNECT_DELAY_MIN = 5
@@ -97,20 +102,31 @@ class SoriaBridge:
             connection_timeout = 5,
         )
 
-        # Initial handshake
+        # Initial handshake — we let TinyTuya handle the connection entirely,
+        # without an asyncio timeout that prematurely terminates the Tuya handshake.
+        # receive() returns None if there is no DPS yet, which is normal.
+        logger.debug("Waiting for initial handshake...")
         first = await loop.run_in_executor(None, self._device.receive)
-        if first is None:
-            raise ConnectionError("Inverter did not respond")
+        logger.debug("Initial receive() returned: %s", first)
+
+        # If TinyTuya raises an internal exception (host unreachable, bad key, etc.),
+        # it will naturally be reported here. If `first` is `None`, it's OK — the
+        # TCP connection is established, but there's no DPS yet.
+        # However, if we receive a Tuya error in the dictionary, we fail.
+        if isinstance(first, dict) and first.get('Error'):
+            raise ConnectionError(f"Tuya error on connect: {first['Error']}")
 
         logger.info("Connected. Listening for DPS updates...")
         await self._mqtt.publish_availability('online')
 
         last_heartbeat = time.time()
+        last_message   = time.time()
 
         while self._running:
             raw = await loop.run_in_executor(None, self._device.receive)
 
             if raw and 'dps' in raw:
+                last_message = time.time()
                 dps = raw['dps']
                 changed = False
                 logger.debug("DPS received — keys: %s", list(dps.keys()))
@@ -129,13 +145,22 @@ class SoriaBridge:
                 if changed:
                     await self._mqtt.publish_state(dataclasses.asdict(self._state))
 
+            elif raw and 'Error' in raw:
+                raise ConnectionError(f"Tuya error: {raw['Error']}")
+
             elif raw:
                 logger.debug("Non-DPS message: %s", raw)
 
-            # raw is None = timeout interne tinytuya, pas une vraie déconnexion
-            # On envoie un heartbeat pour vérifier que le device répond encore
+            # None = internal timeout by tinytuya, normal between messages
 
-            # Heartbeat
+            # Prolonged silence → true disconnection
+            silence = time.time() - last_message
+            if silence > RECEIVE_TIMEOUT:
+                raise ConnectionError(
+                    f"No DPS message for {silence:.0f}s — inverter offline"
+                )
+
+            # Heartbeat to maintain TCP connection
             if time.time() - last_heartbeat > cfg.HEARTBEAT_DELAY:
                 await loop.run_in_executor(None, self._send_heartbeat)
                 last_heartbeat = time.time()
@@ -148,5 +173,5 @@ class SoriaBridge:
             self._device.send(payload)
             logger.debug("Heartbeat sent.")
         except Exception as e:
-            # Heartbeay failed = true disconnection
-            raise ConnectionError(f"Heartbeat failed — inverter offline: {e}")
+            logger.warning("Heartbeat failed: %s", e)
+            raise
