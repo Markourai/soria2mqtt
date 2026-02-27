@@ -1,7 +1,6 @@
 """
 decoder.py — TLV protocol decoder for the Avidsen Soria solar inverter.
 
-Ported from tinytuya/Contrib/SoriaInverterDevice.py.
 Decodes Base64-encoded binary frames using the repeating TLV structure:
     [PREFIX: 3 bytes] [TAG: 1 byte] [VALUE: 2 bytes big-endian]
 
@@ -39,10 +38,20 @@ TAG_W_ACTIVE     = 0x49  # DC solar power (W) — realtime (same value as 0x31)
 TAG_TEMP1        = 0x57
 TAG_TEMP2        = 0x58
 
+# ---------------------------------------------------------------------------
+# Sanity thresholds — values above these are garbage (16-bit overflow at EOD)
+# ---------------------------------------------------------------------------
+
 # Sentinel value emitted when DC current is unmeasurable (end of day, shadow)
+# DC current : 0xFFFF = sentinel "not measurable", ceiling at 2x rated max
 _A1_INVALID_RAW = 0xFFFF
-# Sanity ceiling — Soria 400W rated max DC current ~10A
-_A1_MAX_AMPS = 20.0
+_A1_MAX_AMPS    = 20.0    # Soria 400W rated max ~10A
+# AC power : Soria 400W max rated output
+MAX_AC_POWER_W  = 400     # W  — configurable
+# AC current : P = U*I → 400W / 220V ≈ 1.8A, ceiling at 3x for safety
+MAX_AC_CURRENT_A = 5.0    # A  — configurable
+# Solar power : same physical limit as AC power
+MAX_SOLAR_POWER_W = 400   # W  — configurable
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +146,37 @@ def _valid_a1(raw: Optional[int]) -> Optional[float]:
     return value
 
 
+def _valid_ac_power(raw: Optional[int]) -> Optional[int]:
+    """Return AC power in W, or None if value exceeds device maximum."""
+    if raw is None:
+        return None
+    if raw > MAX_AC_POWER_W:
+        logger.debug("ac_power filtered out (raw=%d > max %dW)", raw, MAX_AC_POWER_W)
+        return None
+    return raw
+
+
+def _valid_solar_power(raw: Optional[int]) -> Optional[int]:
+    """Return solar power in W, or None if value exceeds device maximum."""
+    if raw is None:
+        return None
+    if raw > MAX_SOLAR_POWER_W:
+        logger.debug("solar_power filtered out (raw=%d > max %dW)", raw, MAX_SOLAR_POWER_W)
+        return None
+    return raw
+
+
+def _valid_ac_current(raw: Optional[int]) -> Optional[float]:
+    """Return AC current in A, or None if value exceeds sanity ceiling."""
+    if raw is None:
+        return None
+    value = round(raw / 100, 2)
+    if value > MAX_AC_CURRENT_A:
+        logger.debug("ac_current filtered out (raw=%d -> %.2fA > max %.1fA)", raw, value, MAX_AC_CURRENT_A)
+        return None
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Public decoders
 # ---------------------------------------------------------------------------
@@ -152,8 +192,8 @@ def decode_realtime(b64_value: str, state: SoriaState) -> bool:
     if w_active is None:
         return False
 
-    state.solar_power = w_active
-    state.ac_power    = _get(tags, TAG_W_APPARENT)
+    state.solar_power = _valid_solar_power(w_active)
+    state.ac_power    = _valid_ac_power(_get(tags, TAG_W_APPARENT))
     return True
 
 
@@ -171,12 +211,12 @@ def decode_full_report(b64_value: str, state: SoriaState) -> bool:
     if w_solar is None:
         return False
 
-    state.solar_power = w_solar
-    state.ac_power    = t(TAG_GRID)
+    state.solar_power = _valid_solar_power(w_solar)
+    state.ac_power    = _valid_ac_power(t(TAG_GRID))
     state.dc_voltage  = round(t(TAG_V1_VOLTS)   / 10,  1) if t(TAG_V1_VOLTS)   is not None else None
     state.dc_current  = _valid_a1(t(TAG_A1_AMPERES))
     state.ac_voltage  = round(t(TAG_V2_VOLTS)   / 10,  1) if t(TAG_V2_VOLTS)   is not None else None
-    state.ac_current  = round(t(TAG_A2_AMPERES)  / 100, 2) if t(TAG_A2_AMPERES) is not None else None
+    state.ac_current  = _valid_ac_current(t(TAG_A2_AMPERES))
     state.frequency   = round(t(TAG_HZ)          / 100, 2) if t(TAG_HZ)         is not None else None
     state.temp1       = round(t(TAG_TEMP1)       / 10,  1) if t(TAG_TEMP1)      is not None else None
     state.temp2       = round(t(TAG_TEMP2)       / 10,  1) if t(TAG_TEMP2)      is not None else None
