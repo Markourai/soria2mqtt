@@ -16,7 +16,7 @@ import sys
 from config import Config
 from bridge import SoriaBridge
 
-VERSION = "1.0.5"
+VERSION = "1.1.0"
 
 logging.basicConfig(
     level=logging.INFO,
