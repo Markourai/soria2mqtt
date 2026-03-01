@@ -57,23 +57,20 @@ class SoriaBridge:
 
     async def start(self):
         self._running = True
-        await self._mqtt.connect()
-
-        delay = RECONNECT_DELAY_MIN
-        while self._running:
-            try:
-                await self._run_device_loop()
-                delay = RECONNECT_DELAY_MIN
-            except Exception as e:
-                if not self._running:
-                    break
-                logger.warning("Inverter unreachable: %s", e)
-                await self._mqtt.publish_availability('offline')
-                logger.info("Retrying in %ds...", delay)
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, RECONNECT_DELAY_MAX)
-
-        await self._mqtt.disconnect()
+        async with self._mqtt:
+            delay = RECONNECT_DELAY_MIN
+            while self._running:
+                try:
+                    await self._run_device_loop()
+                    delay = RECONNECT_DELAY_MIN
+                except Exception as e:
+                    if not self._running:
+                        break
+                    logger.warning("Inverter unreachable: %s", e)
+                    await self._mqtt.publish_availability('offline')
+                    logger.info("Retrying in %ds...", delay)
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, RECONNECT_DELAY_MAX)
 
     async def stop(self):
         logger.info("Stopping bridge...")

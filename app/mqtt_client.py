@@ -2,6 +2,7 @@
 mqtt_client.py — MQTT publisher with Home Assistant auto-discovery support.
 
 Uses aiomqtt (async-native MQTT client, actively maintained).
+Le client reste dans son context manager pendant toute la durée de vie du bridge.
 
 Discovery format:
   homeassistant/binary_sensor/soria_<suffix>/connectivity/config  (retained)
@@ -13,7 +14,6 @@ Discovery format:
 
 import json
 import logging
-import asyncio
 from typing import Any
 
 import aiomqtt
@@ -52,61 +52,61 @@ SENSORS = [
 class MqttClient:
 
     def __init__(self, config: Config):
-        self._config = config
+        self._config      = config
         self._client: aiomqtt.Client | None = None
 
+        suffix            = config.DEVICE_ID[-8:]
+        self._suffix      = suffix
+        self._node_id     = f'soria_{suffix}'
         self._avail_topic = AVAILABILITY_TOPIC.format(prefix=config.MQTT_TOPIC_PREFIX)
         self._state_topic = STATE_TOPIC.format(prefix=config.MQTT_TOPIC_PREFIX)
-
-        suffix        = config.DEVICE_ID[-8:]
-        self._node_id = f'soria_{suffix}'
-        self._suffix  = suffix
-        self._device  = {
+        self._device      = {
             'identifiers':  [config.DEVICE_ID],
             'name':         'Soria Solar Inverter',
             'manufacturer': 'Avidsen',
             'model':        'Soria 400W',
-            'sw_version':   '1.0.3',
+            'sw_version':   '1.1.0',
         }
 
-    # ------------------------------------------------------------------
-    # Connection management
-    # ------------------------------------------------------------------
-
-    async def connect(self):
+    def _make_client(self) -> aiomqtt.Client:
+        """Instancie le client aiomqtt avec la config courante."""
         cfg = self._config
-
-        will = aiomqtt.Will(
-            topic   = self._avail_topic,
-            payload = 'offline',
-            qos     = 1,
-            retain  = True,
-        )
-
         kwargs = dict(
-            hostname  = cfg.MQTT_HOST,
-            port      = cfg.MQTT_PORT,
-            will      = will,
-            identifier= 'soria2mqtt',
+            hostname   = cfg.MQTT_HOST,
+            port       = cfg.MQTT_PORT,
+            identifier = 'soria2mqtt',
+            will       = aiomqtt.Will(
+                topic   = self._avail_topic,
+                payload = 'offline',
+                qos     = 1,
+                retain  = True,
+            ),
         )
         if cfg.MQTT_USER:
             kwargs['username'] = cfg.MQTT_USER
             kwargs['password'] = cfg.MQTT_PASSWORD
         if cfg.MQTT_TLS:
-            kwargs['tls_context'] = True
+            import ssl
+            kwargs['tls_context'] = ssl.create_default_context()
+        return aiomqtt.Client(**kwargs)
 
-        self._client = aiomqtt.Client(**kwargs)
+    # ------------------------------------------------------------------
+    # Context manager — à utiliser avec `async with mqtt_client:`
+    # ------------------------------------------------------------------
+
+    async def __aenter__(self):
+        self._client = self._make_client()
         await self._client.__aenter__()
-        logger.info("Connected to MQTT broker %s:%s", cfg.MQTT_HOST, cfg.MQTT_PORT)
-
+        logger.info("Connected to MQTT broker %s:%s",
+                    self._config.MQTT_HOST, self._config.MQTT_PORT)
         await self._publish_discovery()
         logger.info("MQTT ready.")
+        return self
 
-    async def disconnect(self):
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.publish_availability('offline')
-        await asyncio.sleep(0.2)
         if self._client:
-            await self._client.__aexit__(None, None, None)
+            await self._client.__aexit__(exc_type, exc_val, exc_tb)
         logger.info("MQTT disconnected.")
 
     # ------------------------------------------------------------------
@@ -120,7 +120,7 @@ class MqttClient:
                 node_id   = self._node_id,
                 sensor_id = sensor_id,
             )
-            payload = {
+            payload: dict = {
                 'name':           name,
                 'unique_id':      f'soria2mqtt_{self._suffix}_{sensor_id}',
                 'state_topic':    self._state_topic,
@@ -136,36 +136,36 @@ class MqttClient:
             await self._publish(topic, json.dumps(payload), retain=True)
             logger.debug("Discovery: %s", topic)
 
-        # Binary sensor — producing (ON si solar_power > 0)
-        binary_topic = (
-            f'{self._config.HA_DISCOVERY_PREFIX}/binary_sensor'
-            f'/{self._node_id}/producing/config'
+        # Binary sensor — producing
+        await self._publish(
+            f'{self._config.HA_DISCOVERY_PREFIX}/binary_sensor/{self._node_id}/producing/config',
+            json.dumps({
+                'name':           'Producing',
+                'unique_id':      f'soria2mqtt_{self._suffix}_producing',
+                'state_topic':    self._state_topic,
+                'value_template': '{{ "ON" if value_json.solar_power | int(0) > 0 else "OFF" }}',
+                'device_class':   'power',
+                'device':         self._device,
+            }),
+            retain=True,
         )
-        await self._publish(binary_topic, json.dumps({
-            'name':           'Producing',
-            'unique_id':      f'soria2mqtt_{self._suffix}_producing',
-            'state_topic':    self._state_topic,
-            'value_template': '{{ "ON" if value_json.solar_power | int(0) > 0 else "OFF" }}',
-            'device_class':   'power',
-            'device':         self._device,
-        }), retain=True)
-        logger.debug("Discovery binary_sensor: %s", binary_topic)
+        logger.debug("Discovery binary_sensor: producing")
 
-        # Binary sensor — connectivity (ON si bridge connecté à l'onduleur)
-        conn_topic = (
-            f'{self._config.HA_DISCOVERY_PREFIX}/binary_sensor'
-            f'/{self._node_id}/connectivity/config'
+        # Binary sensor — connectivity
+        await self._publish(
+            f'{self._config.HA_DISCOVERY_PREFIX}/binary_sensor/{self._node_id}/connectivity/config',
+            json.dumps({
+                'name':        'Connected',
+                'unique_id':   f'soria2mqtt_{self._suffix}_connectivity',
+                'state_topic': self._avail_topic,
+                'payload_on':  'online',
+                'payload_off': 'offline',
+                'device_class':'connectivity',
+                'device':      self._device,
+            }),
+            retain=True,
         )
-        await self._publish(conn_topic, json.dumps({
-            'name':        'Connected',
-            'unique_id':   f'soria2mqtt_{self._suffix}_connectivity',
-            'state_topic': self._avail_topic,
-            'payload_on':  'online',
-            'payload_off': 'offline',
-            'device_class':'connectivity',
-            'device':      self._device,
-        }), retain=True)
-        logger.debug("Discovery binary_sensor: %s", conn_topic)
+        logger.debug("Discovery binary_sensor: connectivity")
 
         logger.info("MQTT discovery published (%d sensors + 2 binary_sensors).", len(SENSORS))
 
