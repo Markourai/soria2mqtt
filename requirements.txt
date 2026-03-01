@@ -1,2 +1,2 @@
 tinytuya>=1.17.6
-paho-mqtt>=1.6.1
+aiomqtt>=2.3.0
