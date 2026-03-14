@@ -34,6 +34,8 @@ auto-discovery** support.
 | Temperature 2 | °C | DPS 21 (~60s) |
 | Energy Exported | kWh | DPS 21 (~60s) |
 | WiFi Signal | — | DPS 21 (~60s) |
+| Connected | — | (Boolean) true if frames are received |
+| Producing | - | (Boolean) true if Solar Power > 0 |
 
 ## MQTT topics
 
