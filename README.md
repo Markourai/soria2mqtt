@@ -22,14 +22,12 @@ auto-discovery** support.
 
 | Sensor | Unit | Source |
 |--------|------|--------|
-| Solar Power | W | DPS 25 (~2s) |
-| DC  Power | W | DPS 25 (~2s) |
+| Solar Power | W | DPS 25 & 21 (~2s) |
 | DC Voltage | V | DPS 21 (~60s) |
 | DC Current | A | DPS 21 (~60s) |
-| DC Power | W | DPS 21 (~60s) |
+| AC Power | W | DPS 25 & 21 (~60s) |
 | AC Voltage | V | DPS 21 (~60s) |
 | AC Current | A | DPS 21 (~60s) |
-| AC Power | W | DPS 21 (~60s) |
 | Grid Frequency | Hz | DPS 21 (~60s) |
 | Power Factor | — | DPS 21 (~60s) |
 | Temperature 1 | °C | DPS 21 (~60s) |
@@ -42,7 +40,7 @@ auto-discovery** support.
 ```
 soria2mqtt/availability      →  online / offline
 soria2mqtt/state             →  JSON with all sensor values
-homeassistant/sensor/soria_inverter/<sensor>/config  →  discovery (retained)
+homeassistant/sensor/soria_[last 8 chars of device id]/<sensor>/config  →  discovery (retained)
 ```
 
 ## Quick start
